@@ -1,5 +1,7 @@
 import admin from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
+import fs from 'fs';
+import path from 'path';
 
 let db;
 let auth;
@@ -17,10 +19,8 @@ export const initializeFirebase = () => {
       serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     } else {
       // Fallback to file path
-      const fs = require('fs');
-      const path = require('path');
       const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || 
-                                   path.join(process.cwd(), 'firebase-service-account.json');
+                                   path.join(process.cwd(), 'serviceAccountKey.json');
       serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
     }
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Mic, Send, AlertTriangle, ShieldCheck, MapPin, Loader2, Sparkles } from 'lucide-react';
+import { Mic, Send, AlertTriangle, ShieldCheck, MapPin, Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import { triageRequest } from '../services/aiService';
 import { doc, updateDoc, collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import VerificationPanel from './VerificationPanel';
@@ -8,10 +8,10 @@ import MissionMap from './MissionMap';
 import { missionAPI } from '../services/api';
 
 const MOCK_VOLUNTEERS = [
-  { id: '1', name: 'Dr. Sarah Chen', skills: ['Medical', 'First Aid', 'CPR'], distance: 1.2, rating: 4.9 },
-  { id: '2', name: 'Marcus Miller', skills: ['Firefighting', 'Rescue', 'CPR'], distance: 2.5, rating: 4.8 },
-  { id: '3', name: 'Elena Rodriguez', skills: ['Medical', 'Trauma Support'], distance: 0.8, rating: 5.0 },
-  { id: '4', name: 'John Smith', skills: ['Logistics', 'Food Distribution'], distance: 3.1, rating: 4.7 },
+  { id: '1', name: 'Dr. Sarah Chen', skills: ['Medical', 'First Aid', 'CPR'], distance: 1.2, rating: 4.9, location: { lat: 12.9780, lon: 77.5946 } },
+  { id: '2', name: 'Marcus Miller', skills: ['Firefighting', 'Rescue', 'CPR'], distance: 2.5, rating: 4.8, location: { lat: 12.9616, lon: 77.6046 } },
+  { id: '3', name: 'Elena Rodriguez', skills: ['Medical', 'Trauma Support'], distance: 0.8, rating: 5.0, location: { lat: 12.9750, lon: 77.5846 } },
+  { id: '4', name: 'John Smith', skills: ['Logistics', 'Food Distribution'], distance: 3.1, rating: 4.7, location: { lat: 12.9516, lon: 77.5746 } },
 ];
 
 const TriageDashboard = () => {
@@ -36,24 +36,27 @@ const TriageDashboard = () => {
 
     try {
       // Get location for grounding
-      let location = null;
+      let location = { lat: 12.9716, lng: 77.5946 }; // Default center
       try {
         const position = await new Promise((resolve, reject) => {
           navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 });
         });
         location = { lat: position.coords.latitude, lng: position.coords.longitude };
+        setCurrentLocation(location);
       } catch (locErr) {
         console.warn("Location grounding skipped:", locErr.message);
       }
 
-      // Call Backend SOS
-      const backendResult = await reportSOS(text, lat, lon);
-      if (backendResult) {
-        setResult(backendResult.triage);
-        setDispatchedMissionId(backendResult.mission_id);
-        // Automatically fetch nearby volunteers after SOS
-        const volunteers = await fetchTasks('current-user', lat, lon);
-        setMatchedVolunteers(volunteers);
+      // Call AI Triage Service
+      const triageData = await triageRequest(text, location);
+      if (triageData) {
+        setResult(triageData);
+        
+        // Find matching volunteers (mock for now)
+        const matches = MOCK_VOLUNTEERS.filter(v => 
+          v.skills.some(s => triageData.skills.includes(s) || triageData.category === s)
+        ).sort((a, b) => a.distance - b.distance);
+        setMatchedVolunteers(matches);
       }
     } catch (err) {
       setError("AI Triage failed. Please check your API key or try again.");
@@ -67,8 +70,12 @@ const TriageDashboard = () => {
     if (!dispatchedMissionId) return;
     try {
       // Update mission status to active and assign volunteer
+      // Note: The backend route is PUT /api/missions/:id/status
+      // We also need to assign it to the volunteer. 
+      // The current backend doesn't have an explicit 'assign' endpoint, 
+      // so we use the status update.
       const response = await missionAPI.updateStatus(dispatchedMissionId, 'active');
-      if (response.message) {
+      if (response.missionId) {
         setAssignedVolunteer(volunteer);
       }
     } catch (err) {
@@ -82,7 +89,7 @@ const TriageDashboard = () => {
     setIsDispatching(true);
     setError(null);
     try {
-      // Create mission in backend
+      // Create mission in backend using the new missionAPI
       const missionData = {
         category: result.category,
         urgency: result.urgency,
@@ -93,17 +100,14 @@ const TriageDashboard = () => {
       };
 
       const response = await missionAPI.create(missionData);
-      setDispatchedMissionId(response.mission.id);
-      
-      // After creating mission, find volunteers and show list
-      const matches = MOCK_VOLUNTEERS.filter(v => 
-        v.skills.some(s => result.skills.includes(s) || result.category === s)
-      ).sort((a, b) => a.distance - b.distance);
-      
-      setMatchedVolunteers(matches);
+      if (response.mission && response.mission.id) {
+        setDispatchedMissionId(response.mission.id);
+      } else {
+        throw new Error("Failed to get mission ID from server");
+      }
     } catch (err) {
       console.error("Dispatch Error:", err);
-      setError("Failed to dispatch. Please try again.");
+      setError("Failed to dispatch. Please ensure backend is running.");
     } finally {
       setIsDispatching(false);
     }

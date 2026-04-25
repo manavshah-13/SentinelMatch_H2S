@@ -39,7 +39,7 @@ JSON Schema:
 
 export const triageRequest = async (userInput, location = null) => {
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
     const locationContext = location ? `\n[Grounding Data: Victim is at Lat ${location.lat}, Lng ${location.lng}]` : "";
     const prompt = `${TRIAGE_SYSTEM_PROMPT}\n\nUser Message: "${userInput}"${locationContext}`;
     
@@ -58,7 +58,7 @@ export const triageRequest = async (userInput, location = null) => {
 
 export const verifyTaskCompletion = async (imageUri, originalReq) => {
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
     
     // Convert base64 image to GenerativePart
     const base64Data = imageUri.split(",")[1];

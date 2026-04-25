@@ -2,15 +2,26 @@ import os
 import random
 import string
 import hashlib
-from fastapi import FastAPI, HTTPException
+import uuid
+from datetime import datetime, timedelta
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional
+from jose import JWTError, jwt
 from ai_engine import triage_crisis
 from db_manager import create_mission, update_volunteer_location, get_mission, db
 from matcher import get_nearby_volunteers
 
 app = FastAPI(title="SentinelMatch Backend")
+
+# JWT Configuration
+SECRET_KEY = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+security = HTTPBearer()
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +40,7 @@ async def root():
         "message": "Crisis Resource Orchestrator is operational. AI Triage and Real-time matching are ready."
     }
 
+
 class SOSRequest(BaseModel):
     text: str
     lat: float
@@ -46,6 +58,204 @@ class MissionAcceptance(BaseModel):
 class VerifyCompletion(BaseModel):
     mission_id: str
     token: str
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    fullName: str
+    phone: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    email: str
+
+class HelperProfile(BaseModel):
+    uid: str
+    username: str
+    email: str
+    fullName: str
+    phone: Optional[str] = None
+    skills: List[str] = []
+    location: Optional[dict] = None
+    impactPoints: int = 0
+    createdAt: str
+
+class UpdateProfileRequest(BaseModel):
+    fullName: Optional[str] = None
+    phone: Optional[str] = None
+    skills: Optional[List[str]] = None
+
+# JWT Helper Functions
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        uid: str = payload.get("sub")
+        if uid is None:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        return uid
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+
+def generate_username(full_name: str) -> str:
+    """Generate a unique username from full name"""
+    base_name = full_name.lower().replace(" ", "").replace("-", "")
+    # Add random suffix to ensure uniqueness
+    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    return f"{base_name}{suffix}"
+
+# Auth Endpoints
+@app.post("/api/auth/register")
+async def register_helper(request: RegisterRequest):
+    """Passwordless registration for helpers"""
+    try:
+        # Check if email already exists
+        if db:
+            existing = db.collection('volunteers').where('email', '==', request.email).limit(1).get()
+            if len(list(existing)) > 0:
+                raise HTTPException(status_code=400, detail="Email already registered")
+
+        # Generate unique username
+        username = generate_username(request.fullName)
+
+        # Create helper profile
+        helper_data = {
+            "uid": str(uuid.uuid4()),
+            "username": username,
+            "email": request.email,
+            "fullName": request.fullName,
+            "phone": request.phone,
+            "skills": [],
+            "impactPoints": 0,
+            "createdAt": datetime.utcnow().isoformat()
+        }
+
+        # Store in Firebase
+        if db:
+            doc_ref = db.collection('volunteers').document(helper_data["uid"])
+            doc_ref.set(helper_data)
+
+        # Create JWT token
+        access_token = create_access_token(data={"sub": helper_data["uid"]})
+
+        return {
+            "success": True,
+            "token": access_token,
+            "helper": helper_data,
+            "generatedUsername": username
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/auth/login")
+async def login_helper(request: LoginRequest):
+    """Passwordless login for helpers"""
+    try:
+        # Find helper by email
+        if db:
+            helpers = db.collection('volunteers').where('email', '==', request.email).limit(1).get()
+            helper_docs = list(helpers)
+
+            if not helper_docs:
+                raise HTTPException(status_code=404, detail="Email not found. Please register first.")
+
+            helper_data = helper_docs[0].to_dict()
+        else:
+            # Mock data for testing
+            helper_data = {
+                "uid": str(uuid.uuid4()),
+                "username": "mockuser123",
+                "email": request.email,
+                "fullName": "Mock User",
+                "phone": None,
+                "skills": ["Medical"],
+                "impactPoints": 0,
+                "createdAt": datetime.utcnow().isoformat()
+            }
+
+        # Create JWT token
+        access_token = create_access_token(data={"sub": helper_data["uid"]})
+
+        return {
+            "success": True,
+            "token": access_token,
+            "helper": helper_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/helpers/profile")
+async def get_helper_profile(uid: str = Depends(verify_token)):
+    """Get helper profile"""
+    try:
+        if db:
+            doc = db.collection('volunteers').document(uid).get()
+            if not doc.exists:
+                raise HTTPException(status_code=404, detail="Profile not found")
+
+            profile_data = doc.to_dict()
+        else:
+            # Mock profile for testing
+            profile_data = {
+                "uid": uid,
+                "username": "mockuser123",
+                "email": "mock@example.com",
+                "fullName": "Mock User",
+                "phone": None,
+                "skills": ["Medical"],
+                "impactPoints": 0,
+                "createdAt": datetime.utcnow().isoformat()
+            }
+
+        return {"profile": profile_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/helpers/profile")
+async def update_helper_profile(request: UpdateProfileRequest, uid: str = Depends(verify_token)):
+    """Update helper profile"""
+    try:
+        update_data = {}
+        if request.fullName is not None:
+            update_data["fullName"] = request.fullName
+        if request.phone is not None:
+            update_data["phone"] = request.phone
+        if request.skills is not None:
+            update_data["skills"] = request.skills
+
+        if db:
+            db.collection('volunteers').document(uid).update(update_data)
+
+            # Get updated profile
+            doc = db.collection('volunteers').document(uid).get()
+            if doc.exists:
+                profile_data = doc.to_dict()
+            else:
+                raise HTTPException(status_code=404, detail="Profile not found")
+        else:
+            # Mock update for testing
+            profile_data = {
+                "uid": uid,
+                "username": "mockuser123",
+                "email": "mock@example.com",
+                "fullName": request.fullName or "Mock User",
+                "phone": request.phone,
+                "skills": request.skills or ["Medical"],
+                "impactPoints": 0,
+                "createdAt": datetime.utcnow().isoformat()
+            }
+
+        return {"profile": profile_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sos")
 async def handle_sos(request: SOSRequest):
